@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ChatKit Document Extraction Demo</title>
+    <script src="https://cdn.platform.openai.com/deployments/chatkit/chatkit.js" async></script>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        background: #f6f6f9;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+      }
+
+      #chatkit-container {
+        width: 420px;
+        height: 640px;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.15);
+        border-radius: 16px;
+        overflow: hidden;
+        background: white;
+        display: flex;
+      }
+
+      .loading {
+        font-size: 1rem;
+        color: #475569;
+        text-align: center;
+        padding: 3rem 4rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="chatkit-container">
+      <div class="loading">Loading ChatKit…</div>
+    </div>
+
+    <script type="module">
+      const container = document.getElementById("chatkit-container");
+      const API_BASE = "http://127.0.0.1:8787";
+
+      async function getClientSecret(existing) {
+        if (existing) {
+          // TODO: implement refresh logic if long-lived sessions are required.
+          return existing;
+        }
+
+        const response = await fetch(`${API_BASE}/api/chatkit/session`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch client secret: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        return data.client_secret;
+      }
+
+      async function init() {
+        await window.chatkit.ready;
+
+        const chat = await window.chatkit.mount(
+          container,
+          {
+            api: {
+              getClientSecret,
+            },
+            theme: {
+              colorMode: "light",
+            },
+            layout: {
+              showHeader: true,
+            },
+          },
+        );
+
+        window.chatkitInstance = chat;
+      }
+
+      init().catch((error) => {
+        container.innerHTML = `<div class="loading">${error}</div>`;
+        console.error(error);
+      });
+    </script>
+  </body>
+</html>
+
+

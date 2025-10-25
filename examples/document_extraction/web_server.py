@@ -1,0 +1,76 @@
+"""Minimal local runner for the document extraction workflow.
+
+Serve a single HTML page at http://localhost:5003 with an upload button and
+start trigger. Uploaded files are sent to `/api/upload-run`, converted into a
+`WorkflowInput`, and processed with `run_workflow`. Results are logged to the
+server console only.
+"""
+
+from __future__ import annotations
+
+import base64
+import mimetypes
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse
+
+from .workflow import WorkflowInput, run_workflow
+
+
+app = FastAPI(title="Document Extraction Local Runner")
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    """Return the static HTML page."""
+
+    web_dir = Path(__file__).with_name("web")
+    html_path = web_dir / "index.html"
+    if not html_path.is_file():
+        raise HTTPException(status_code=500, detail="index.html not found")
+    return html_path.read_text(encoding="utf-8")
+
+
+def _build_workflow_input(filename: str, data: bytes) -> WorkflowInput:
+    """Convert uploaded bytes into a `WorkflowInput` instance."""
+
+    mime_type, _ = mimetypes.guess_type(filename)
+    mime_type = mime_type or "application/octet-stream"
+
+    try:
+        decoded_text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded_text = None
+
+    if decoded_text is not None:
+        return WorkflowInput(input_as_text=decoded_text)
+
+    encoded = base64.b64encode(data).decode("ascii")
+    data_url = f"data:{mime_type};base64,{encoded}"
+
+    if mime_type.startswith("image/"):
+        return WorkflowInput(input_as_image_url=data_url)
+
+    if mime_type == "application/pdf":
+        return WorkflowInput(input_as_file_data=data_url)
+
+    raise HTTPException(status_code=415, detail=f"Unsupported file type: {mime_type}")
+
+
+@app.post("/api/upload-run")
+async def upload_run(file: UploadFile = File(...)) -> dict[str, str]:
+    """Handle uploads, run the workflow, and log the results."""
+
+    data = await file.read()
+    workflow_input = _build_workflow_input(file.filename, data)
+    result = await run_workflow(workflow_input)
+
+    print("\n=== Classification ===")
+    print(result.get("classification"))
+
+    print("\n=== Extraction ===")
+    print(result.get("extraction"))
+
+    return {"status": "ok"}
+

@@ -1,0 +1,3 @@
+"""Document extraction example package."""
+
+

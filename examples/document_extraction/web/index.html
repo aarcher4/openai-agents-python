@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Document Extraction Test</title>
+    <style>
+      body {
+        background: #fff;
+        font-family: Arial, sans-serif;
+        padding: 40px;
+      }
+
+      .btn {
+        background: #e0e0e0;
+        color: #000;
+        padding: 12px 16px;
+        border: none;
+        cursor: pointer;
+        margin-right: 8px;
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <input id="file" type="file" style="display: none" />
+    <button id="choose" class="btn">Upload file</button>
+    <button id="start" class="btn" disabled>Start</button>
+    <span id="status" style="margin-left: 12px"></span>
+    <script>
+      const fileInput = document.getElementById('file');
+      const chooseBtn = document.getElementById('choose');
+      const startBtn = document.getElementById('start');
+      const status = document.getElementById('status');
+
+      chooseBtn.onclick = () => fileInput.click();
+      fileInput.onchange = () => {
+        startBtn.disabled = !fileInput.files.length;
+        status.textContent = fileInput.files.length ? fileInput.files[0].name : '';
+      };
+
+      startBtn.onclick = async () => {
+        if (!fileInput.files.length) {
+          return;
+        }
+
+        startBtn.disabled = true;
+        chooseBtn.disabled = true;
+        status.textContent = 'Uploading…';
+
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+
+        try {
+          const response = await fetch('/api/upload-run', {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!response.ok) {
+            throw new Error('Upload failed');
+          }
+
+          status.textContent = 'Done (check server console)';
+        } catch (error) {
+          status.textContent = 'Error: ' + error.message;
+        } finally {
+          startBtn.disabled = false;
+          chooseBtn.disabled = false;
+        }
+      };
+    </script>
+  </body>
+</html>
+
