@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
+from .supabase_store import InsertContext, insert_extraction_result
 from .workflow import WorkflowInput, run_workflow
 
 
@@ -59,7 +62,7 @@ def _build_workflow_input(filename: str, data: bytes) -> WorkflowInput:
 
 
 @app.post("/api/upload-run")
-async def upload_run(file: UploadFile = File(...)) -> dict[str, str]:
+async def upload_run(file: UploadFile = File(...)) -> dict[str, Any]:
     """Handle uploads, run the workflow, and log the results."""
 
     data = await file.read()
@@ -72,5 +75,33 @@ async def upload_run(file: UploadFile = File(...)) -> dict[str, str]:
     print("\n=== Extraction ===")
     print(result.get("extraction"))
 
-    return {"status": "ok"}
+    # Store in database if DATABASE_URL is set
+    if os.environ.get("DATABASE_URL"):
+        try:
+            mime_type, _ = mimetypes.guess_type(file.filename or "document")
+            inserted_ids = insert_extraction_result(
+                result,
+                InsertContext(
+                    source_filename=file.filename,
+                    source_mime=mime_type or "application/octet-stream",
+                    org_id=int(os.environ.get("ORG_ID", 0)) or None,
+                    source_doc_id=os.environ.get("SOURCE_DOC_ID"),
+                ),
+            )
+            print("\n=== Stored in Database ===")
+            print(f"Inserted IDs: {inserted_ids}")
+            return {
+                "status": "ok",
+                "stored": True,
+                "ids": {k: str(v) for k, v in inserted_ids.items()},
+            }
+        except Exception as e:
+            print(f"\n=== Database Storage Failed ===")
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"status": "ok", "stored": False, "error": str(e)}
+    else:
+        print("\n=== Database storage skipped (DATABASE_URL not set) ===")
+        return {"status": "ok", "stored": False}
 
