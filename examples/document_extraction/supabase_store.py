@@ -31,6 +31,27 @@ class InsertContext:
     source_mime: str | None = None
     org_id: int | None = None
     source_doc_id: str | None = None
+    document_id: uuid.UUID | None = None
+
+
+_DOCUMENT_LABELS = {
+    "invoice",
+    "bol",
+    "purchase_order",
+    "inspection",
+    "cold_storage_invoice",
+    "usda_inspection",
+    "unknown",
+}
+
+
+_DOCUMENT_STATUS_VALUES = {
+    "classified",
+    "extracted",
+    "stored",
+    "failed",
+    "soft_deleted",
+}
 
 
 def _get_database_url() -> str:
@@ -38,6 +59,19 @@ def _get_database_url() -> str:
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable must be set.")
     return database_url
+
+
+def _normalize_document_label(label: Any) -> str:
+    if not isinstance(label, str):
+        return "unknown"
+    trimmed = label.strip().lower()
+    return trimmed if trimmed in _DOCUMENT_LABELS else "unknown"
+
+
+def _ensure_document_status(value: str) -> str:
+    if value not in _DOCUMENT_STATUS_VALUES:
+        raise ValueError(f"Invalid document status: {value}")
+    return value
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -171,6 +205,67 @@ def _parse_percentage_range(value: Any) -> tuple[Decimal | None, Decimal | None]
     return None, None
 
 
+def _require_document_id(ctx: InsertContext) -> uuid.UUID:
+    if ctx.document_id is None:
+        raise ValueError("InsertContext.document_id must be set before inserting entity rows.")
+    return ctx.document_id
+
+
+def _insert_or_get_document(
+    cur: psycopg.Cursor[Any],
+    classification: dict[str, Any],
+    ctx: InsertContext,
+) -> uuid.UUID:
+    if ctx.document_id is not None:
+        return ctx.document_id
+    if ctx.org_id is None:
+        raise ValueError("InsertContext.org_id must be provided to insert a document.")
+
+    label = _normalize_document_label(classification.get("label"))
+    confidence = _to_decimal(classification.get("confidence"))
+    reasoning = _trim_text(classification.get("reasoning"))
+
+    metadata_payload: dict[str, Any] = {}
+    if classification:
+        metadata_payload["classification"] = classification
+    if ctx.source_doc_id:
+        metadata_payload["source_doc_id"] = ctx.source_doc_id
+
+    metadata = _to_jsonb(metadata_payload) if metadata_payload else None
+
+    values: dict[str, Any] = {
+        "org_id": ctx.org_id,
+        "source_filename": _trim_text(ctx.source_filename),
+        "source_mime": _trim_text(ctx.source_mime),
+        "classification_label": label,
+        "classification_confidence": confidence,
+        "classification_reasoning": reasoning,
+    }
+    if metadata is not None:
+        values["metadata"] = metadata
+
+    document_id = _insert_and_return(cur, "openai.documents", values)
+    if not isinstance(document_id, uuid.UUID):
+        document_id = uuid.UUID(str(document_id))
+    ctx.document_id = document_id
+    return document_id
+
+
+def _set_document_status(cur: psycopg.Cursor[Any], document_id: uuid.UUID, status: str) -> None:
+    status_value = _ensure_document_status(status)
+    cur.execute(
+        "UPDATE openai.documents SET status = %s WHERE id = %s",
+        (status_value, document_id),
+    )
+
+
+def soft_delete_document(document_id: uuid.UUID) -> None:
+    database_url = _get_database_url()
+    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT openai.soft_delete_document(%s)", (document_id,))
+
+
 def insert_extraction_result(
     workflow_result: dict[str, Any],
     source_ctx: InsertContext | None = None,
@@ -186,10 +281,15 @@ def insert_extraction_result(
     """
 
     extraction = workflow_result.get("extraction") or {}
+    classification = workflow_result.get("classification") or {}
 
     extraction_type = extraction.get("type")
+    label = classification.get("label")
+
     if not extraction_type:
         raise ValueError("Extraction result missing 'type'.")
+    if not label:
+        raise ValueError("Classification result missing 'label'.")
 
     ctx = source_ctx or InsertContext()
 
@@ -198,6 +298,15 @@ def insert_extraction_result(
     with psycopg.connect(database_url, autocommit=False, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             inserted_ids: dict[str, Any] = {}
+
+            document_id = _insert_or_get_document(cur, classification, ctx)
+            inserted_ids["openai.documents"] = document_id
+
+            ctx.document_id = document_id
+            ctx.source_doc_id = ctx.source_doc_id or str(document_id)
+
+            if extraction_type != "fallback":
+                _set_document_status(cur, document_id, "extracted")
 
             if extraction_type == "invoice":
                 inserted_ids.update(_insert_invoice(cur, extraction, ctx))
@@ -211,8 +320,13 @@ def insert_extraction_result(
                 inserted_ids.update(_insert_cold_storage_invoice(cur, extraction, ctx))
             elif extraction_type == "usda_inspection":
                 inserted_ids.update(_insert_usda_inspection(cur, extraction, ctx))
+            elif extraction_type == "fallback":
+                _set_document_status(cur, document_id, "failed")
             else:
                 raise ValueError(f"Unsupported extraction type: {extraction_type}")
+
+            if extraction_type != "fallback":
+                _set_document_status(cur, document_id, "stored")
 
         conn.commit()
         return inserted_ids
@@ -228,11 +342,13 @@ def _insert_invoice(
     due_date, due_raw = _parse_date(data.get("dueDate"))
     delivery_date, delivery_raw = _parse_date(data.get("deliveryDate"))
     source_doc_uuid = _to_uuid(ctx.source_doc_id)
+    document_id = _require_document_id(ctx)
 
     invoice_id = _insert_and_return(
         cur,
         "openai.invoices",
         {
+            "document_id": document_id,
             "invoice_number": _trim_text(data.get("invoiceNumber")),
             "vendor_name": _trim_text(data.get("vendorName")),
             "vendor_address": _trim_text(data.get("vendorAddress")),
@@ -324,6 +440,7 @@ def _insert_bol(
     delivery_date, delivery_raw = _parse_date(data.get("deliveryDate"))
     requested_date, requested_raw = _parse_date(data.get("requestedDate"))
     source_doc_uuid = _to_uuid(ctx.source_doc_id)
+    document_id = _require_document_id(ctx)
 
     weights = data.get("weights") or {}
     temperature = data.get("temperature") or {}
@@ -332,6 +449,7 @@ def _insert_bol(
         cur,
         "openai.bols",
         {
+            "document_id": document_id,
             "bol_number": _trim_text(data.get("bolNumber")),
             "carrier": _trim_text(data.get("carrier")),
             "shipper": _trim_text(data.get("shipper")),
@@ -431,11 +549,13 @@ def _insert_purchase_order(
     ctx: InsertContext,
 ) -> dict[str, Any]:
     data = extraction.get("data") or {}
+    document_id = _require_document_id(ctx)
 
     po_id = _insert_and_return(
         cur,
         "openai.purchase_orders",
         {
+            "document_id": document_id,
             "po_number": _trim_text(data.get("poNumber")),
             "vendor_name": _trim_text(data.get("vendorName")),
             "vendor_address": _trim_text(data.get("vendorAddress")),
@@ -535,11 +655,13 @@ def _insert_inspection(
     delivery_date, delivery_raw = _parse_date(data.get("deliveryDate"))
     temperature = data.get("temperature") or {}
     source_doc_uuid = _to_uuid(ctx.source_doc_id)
+    document_id = _require_document_id(ctx)
 
     inspection_id = _insert_and_return(
         cur,
         "openai.inspections",
         {
+            "document_id": document_id,
             "inspection_number": _trim_text(data.get("inspectionNumber")),
             "inspection_date": inspection_date,
             "inspection_date_raw": inspection_raw,
@@ -641,6 +763,7 @@ def _insert_cold_storage_invoice(
     bill_to = data.get("BillTo") or {}
     reference = data.get("PO_Reference_Structure") or {}
     summary = data.get("FinancialSummary") or {}
+    document_id = _require_document_id(ctx)
 
     invoice_number = _trim_text(header.get("InvoiceNumber"))
     if not invoice_number:
@@ -653,6 +776,7 @@ def _insert_cold_storage_invoice(
         cur,
         "openai.cold_storage_invoices",
         {
+            "document_id": document_id,
             "invoice_type": _trim_text(data.get("InvoiceType")) or "Cold Storage/Logistics",
             "invoice_number": invoice_number,
             "invoice_date": invoice_date,
@@ -737,6 +861,7 @@ def _insert_usda_inspection(
     logistics = data.get("logistics_and_parties") or {}
     inspection_event = data.get("inspection_event") or {}
     lots_inspected = data.get("lots_inspected") or []
+    document_id = _require_document_id(ctx)
 
     certificate_id = _trim_text(data.get("certificate_id"))
     applicant = _trim_text(logistics.get("applicant"))
@@ -750,18 +875,11 @@ def _insert_usda_inspection(
     inspection_site = _trim_text(inspection_event.get("inspection_site"))
     inspector_signature_id = _trim_text(inspection_event.get("inspector_signature_id"))
 
+    # Only require the most critical fields that should always be present
     required_fields = {
         "certificate_id": certificate_id,
         "applicant": applicant,
-        "applicant_city": applicant_city,
-        "shipper": shipper,
-        "shipper_city": shipper_city,
-        "carrier_or_lot_id": carrier_or_lot_id,
-        "loading_status": loading_status,
-        "origin_country_code": origin_country_code,
-        "market_office": market_office,
         "inspection_site": inspection_site,
-        "inspector_signature_id": inspector_signature_id,
     }
 
     missing = [name for name, value in required_fields.items() if not value]
@@ -777,6 +895,7 @@ def _insert_usda_inspection(
         cur,
         "openai.usda_inspections",
         {
+            "document_id": document_id,
             "certificate_id": certificate_id,
             "report_id": _trim_text(data.get("report_id")),
             "online_access_password": _trim_text(data.get("online_access_password")),

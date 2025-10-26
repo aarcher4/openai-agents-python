@@ -12,6 +12,9 @@ API with GPT-5 models and structured outputs.
 - Optional BOL widget agent that produces a compact shipping summary.
 - Support for text inputs, image URLs, and local image files (converted to
   base64 data URLs).
+- Optional Supabase persistence that records each classified document in
+  `openai.documents`, links the downstream entity (`openai.invoices`, `openai.bols`,
+  etc.) via `document_id`, and provides soft-delete helpers.
 
 ## Running the example
 
