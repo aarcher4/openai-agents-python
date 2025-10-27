@@ -24,6 +24,27 @@
         opacity: 0.5;
         cursor: not-allowed;
       }
+
+      select {
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 14px;
+        min-width: 400px;
+      }
+
+      #bundleStatus {
+        color: #666;
+        font-style: italic;
+      }
+
+      #bundleStatus.error {
+        color: #d00;
+      }
+
+      #bundleStatus.success {
+        color: #090;
+      }
     </style>
   </head>
   <body>
@@ -123,14 +144,34 @@
           if (!res.ok) throw new Error('Failed to load documents');
           const docs = await res.json();
           docSelect.innerHTML = '';
-          for (const d of docs) {
+          
+          if (!docs || docs.length === 0) {
             const opt = document.createElement('option');
-            opt.value = d.id;
-            opt.textContent = `${d.id.slice(0,8)} · ${d.label}${d.po_number? ' · PO '+d.po_number : ''}${d.invoice_number? ' · INV '+d.invoice_number : ''}`;
+            opt.value = '';
+            opt.textContent = '(No unassigned documents available)';
+            opt.disabled = true;
             docSelect.appendChild(opt);
+            createBundleBtn.disabled = true;
+            addToBundleBtn.disabled = true;
+          } else {
+            createBundleBtn.disabled = false;
+            addToBundleBtn.disabled = false;
+            for (const d of docs) {
+              const opt = document.createElement('option');
+              opt.value = d.id;
+              opt.textContent = `${d.id.slice(0,8)} · ${d.label}${d.po_number? ' · PO '+d.po_number : ''}${d.invoice_number? ' · INV '+d.invoice_number : ''}`;
+              docSelect.appendChild(opt);
+            }
           }
         } catch (e) {
           bundleStatus.textContent = 'Error loading documents: ' + e.message;
+          bundleStatus.className = 'error';
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = '(Error loading documents)';
+          opt.disabled = true;
+          docSelect.innerHTML = '';
+          docSelect.appendChild(opt);
         }
       }
 
@@ -140,21 +181,35 @@
           if (!res.ok) throw new Error('Failed to load bundles');
           const bundles = await res.json();
           bundleSelect.innerHTML = '';
-          for (const b of bundles) {
+          
+          if (!bundles || bundles.length === 0) {
             const opt = document.createElement('option');
-            opt.value = b.id;
-            opt.textContent = `${b.id.slice(0,8)} · ${b.key_po_number || ''} ${b.key_invoice_number || ''}`.trim();
+            opt.value = '';
+            opt.textContent = '(No bundles available)';
+            opt.disabled = true;
             bundleSelect.appendChild(opt);
+          } else {
+            for (const b of bundles) {
+              const opt = document.createElement('option');
+              opt.value = b.id;
+              const label = b.key_po_number || b.key_invoice_number || 'Untitled';
+              opt.textContent = `${b.id.slice(0,8)} · ${label} (${b.document_count || 0} docs)`;
+              bundleSelect.appendChild(opt);
+            }
           }
         } catch (e) {
           bundleStatus.textContent = 'Error loading bundles: ' + e.message;
+          bundleStatus.className = 'error';
         }
       }
 
       async function refreshAll() {
         bundleStatus.textContent = 'Refreshing…';
+        bundleStatus.className = '';
         await Promise.all([loadUnassigned(), loadBundles()]);
-        bundleStatus.textContent = '';
+        bundleStatus.textContent = 'Refreshed';
+        bundleStatus.className = 'success';
+        setTimeout(() => { bundleStatus.textContent = ''; bundleStatus.className = ''; }, 2000);
       }
 
       refreshBtn.onclick = refreshAll;
@@ -162,8 +217,13 @@
       createBundleBtn.onclick = async () => {
         try {
           const id = docSelect.value;
-          if (!id) return;
+          if (!id) {
+            bundleStatus.textContent = 'Please select a document';
+            bundleStatus.className = 'error';
+            return;
+          }
           bundleStatus.textContent = 'Creating bundle…';
+          bundleStatus.className = '';
           const res = await fetch('/api/bundles', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -172,9 +232,11 @@
           const body = await res.json();
           if (!res.ok) throw new Error(body.detail || 'Create failed');
           bundleStatus.textContent = 'Created bundle ' + body.bundle_id.slice(0,8);
+          bundleStatus.className = 'success';
           await refreshAll();
         } catch (e) {
           bundleStatus.textContent = 'Error: ' + e.message;
+          bundleStatus.className = 'error';
         }
       };
 
@@ -182,8 +244,13 @@
         try {
           const id = docSelect.value;
           const bundleId = bundleSelect.value;
-          if (!id || !bundleId) return;
+          if (!id || !bundleId) {
+            bundleStatus.textContent = 'Please select a document and bundle';
+            bundleStatus.className = 'error';
+            return;
+          }
           bundleStatus.textContent = 'Adding…';
+          bundleStatus.className = '';
           const res = await fetch(`/api/bundles/${bundleId}/add`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -192,9 +259,11 @@
           const body = await res.json();
           if (!res.ok) throw new Error(body.detail || 'Add failed');
           bundleStatus.textContent = 'Added to bundle';
+          bundleStatus.className = 'success';
           await refreshAll();
         } catch (e) {
           bundleStatus.textContent = 'Error: ' + e.message;
+          bundleStatus.className = 'error';
         }
       };
 

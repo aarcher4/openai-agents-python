@@ -61,6 +61,32 @@ def _get_database_url() -> str:
     return database_url
 
 
+def _connect(*, autocommit: bool) -> psycopg.Connection[Any]:
+    """Create a connection with prepared statements disabled and clean state.
+
+    PgBouncer in transaction pooling can leak prepared statements across
+    transactions. We hard-disable server-side prepared statements and run
+    DEALLOCATE ALL on connect to avoid name collisions such as
+    'prepared statement "_pg3_0" already exists'.
+    """
+    database_url = _get_database_url()
+    conn = psycopg.connect(
+        database_url,
+        autocommit=autocommit,
+        row_factory=dict_row,
+        # Disable server-side prepared statements completely.
+        # In psycopg3, set prepare_threshold=None to disable.
+        prepare_threshold=None,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DEALLOCATE ALL")
+    except Exception:
+        # Ignore if not supported or no prepared statements exist.
+        pass
+    return conn
+
+
 def _normalize_document_label(label: Any) -> str:
     if not isinstance(label, str):
         return "unknown"
@@ -141,12 +167,26 @@ def _trim_text(value: Any) -> str | None:
 
 
 def _to_jsonb(value: Any) -> Jsonb | None:
-    """Convert a dict/list to psycopg Jsonb type for insertion."""
+    """Convert a Python structure to psycopg Jsonb with JSON-safe values."""
     if value is None:
         return None
-    if isinstance(value, (dict, list)):
-        return Jsonb(value)
+    if isinstance(value, (dict, list, tuple, set)):
+        return Jsonb(_json_safe(value))
     return None
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _to_uuid(value: Any) -> uuid.UUID | None:
@@ -263,8 +303,7 @@ def _set_document_status(cur: psycopg.Cursor[Any], document_id: uuid.UUID, statu
 
 
 def soft_delete_document(document_id: uuid.UUID) -> None:
-    database_url = _get_database_url()
-    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row, prepare_threshold=0) as conn:
+    with _connect(autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT openai.soft_delete_document(%s)", (document_id,))
 
@@ -296,11 +335,8 @@ def insert_extraction_result(
 
     ctx = source_ctx or InsertContext()
 
-    database_url = _get_database_url()
-
-    # Use prepare_threshold=0 to disable prepared statements and avoid
-    # "prepared statement already exists" errors on connection reuse
-    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
+    # Use a clean connection with prepared statements disabled.
+    with _connect(autocommit=False) as conn:
         with conn.cursor() as cur:
             inserted_ids: dict[str, Any] = {}
 
@@ -345,7 +381,7 @@ def insert_extraction_result(
                 }
                 cur.execute(
                     "UPDATE openai.documents SET document_data = %s WHERE id = %s",
-                    (Jsonb(snapshot), document_id),
+                    (_to_jsonb(snapshot), document_id),
                 )
             except Exception:
                 # Do not fail the whole transaction if snapshotting has an unexpected shape.
@@ -460,7 +496,7 @@ def _append_bundle_snapshot(
     filtered.append(doc_snapshot)
     cur.execute(
         "update openai.bundles set documents_snapshot = %s, updated_at = now() where id = %s",
-        (Jsonb(filtered), bundle_id),
+        (_to_jsonb(filtered), bundle_id),
     )
 
 
@@ -478,7 +514,7 @@ def _remove_bundle_snapshot(cur: psycopg.Cursor[Any], bundle_id: uuid.UUID, docu
     filtered = [x for x in arr if not (isinstance(x, dict) and str(x.get("document_id")) == str(document_id))]
     cur.execute(
         "update openai.bundles set documents_snapshot = %s, updated_at = now() where id = %s",
-        (Jsonb(filtered), bundle_id),
+        (_to_jsonb(filtered), bundle_id),
     )
 
 
@@ -521,8 +557,7 @@ def _build_bundle_key_fields(
 
 
 def create_bundle_for_document(document_id: uuid.UUID, org_id: int) -> uuid.UUID:
-    database_url = _get_database_url()
-    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
+    with _connect(autocommit=False) as conn:
         with conn.cursor() as cur:
             doc = _get_document_row(cur, document_id)
             if doc.get("org_id") != org_id:
@@ -559,7 +594,7 @@ def create_bundle_for_document(document_id: uuid.UUID, org_id: int) -> uuid.UUID
                 values (%s, %s, %s, %s)
                 on conflict do nothing
                 """,
-                (bundle_id, document_id, doc_type, Jsonb(doc_snapshot)),
+                (bundle_id, document_id, doc_type, _to_jsonb(doc_snapshot)),
             )
             _update_document_assigned_bundles(cur, document_id, add_bundle_id=bundle_id, remove_bundle_id=None)
             _append_bundle_snapshot(cur, bundle_id, doc_snapshot)
@@ -569,8 +604,7 @@ def create_bundle_for_document(document_id: uuid.UUID, org_id: int) -> uuid.UUID
 
 
 def add_document_to_bundle(bundle_id: uuid.UUID, document_id: uuid.UUID) -> None:
-    database_url = _get_database_url()
-    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
+    with _connect(autocommit=False) as conn:
         with conn.cursor() as cur:
             bundle = _fetch_one(
                 cur,
@@ -602,7 +636,7 @@ def add_document_to_bundle(bundle_id: uuid.UUID, document_id: uuid.UUID) -> None
                 values (%s, %s, %s, %s)
                 on conflict do nothing
                 """,
-                (bundle_id, document_id, doc_type, Jsonb(doc_snapshot)),
+                (bundle_id, document_id, doc_type, _to_jsonb(doc_snapshot)),
             )
             _update_document_assigned_bundles(cur, document_id, add_bundle_id=bundle_id, remove_bundle_id=None)
             _append_bundle_snapshot(cur, bundle_id, doc_snapshot)
@@ -611,8 +645,7 @@ def add_document_to_bundle(bundle_id: uuid.UUID, document_id: uuid.UUID) -> None
 
 
 def remove_document_from_bundle(bundle_id: uuid.UUID, document_id: uuid.UUID) -> None:
-    database_url = _get_database_url()
-    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
+    with _connect(autocommit=False) as conn:
         with conn.cursor() as cur:
             # Remove association first
             cur.execute(
@@ -640,8 +673,7 @@ def remove_document_from_bundle(bundle_id: uuid.UUID, document_id: uuid.UUID) ->
 
 
 def list_unassigned_documents(org_id: int) -> list[dict[str, Any]]:
-    database_url = _get_database_url()
-    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row, prepare_threshold=0) as conn:
+    with _connect(autocommit=True) as conn:
         with conn.cursor() as cur:
             rows = _fetch_all(
                 cur,
@@ -675,8 +707,7 @@ def list_unassigned_documents(org_id: int) -> list[dict[str, Any]]:
 
 
 def list_bundles(org_id: int) -> list[dict[str, Any]]:
-    database_url = _get_database_url()
-    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row, prepare_threshold=0) as conn:
+    with _connect(autocommit=True) as conn:
         with conn.cursor() as cur:
             bundles = _fetch_all(
                 cur,
@@ -694,6 +725,8 @@ def list_bundles(org_id: int) -> list[dict[str, Any]]:
                 for k in ("created_at", "updated_at"):
                     if b.get(k):
                         b[k] = b[k].isoformat()
+                if "document_count" in b:
+                    b["document_count"] = int(b["document_count"]) if b["document_count"] is not None else 0
             return bundles
 
 def _insert_invoice(

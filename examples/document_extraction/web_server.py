@@ -158,7 +158,10 @@ def api_create_bundle(payload: dict[str, Any]) -> JSONResponse:
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        msg = str(e)
+        if "prepared statement" in msg:
+            raise HTTPException(status_code=503, detail="Database connection state conflict. Please retry.")
+        raise HTTPException(status_code=500, detail=msg)
 
 
 @app.post("/api/bundles/{bundle_id}/add")
@@ -176,7 +179,10 @@ def api_add_to_bundle(bundle_id: str, payload: dict[str, Any]) -> JSONResponse:
     except ValueError as ve:
         raise HTTPException(status_code=409, detail=str(ve))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        msg = str(e)
+        if "prepared statement" in msg:
+            raise HTTPException(status_code=503, detail="Database connection state conflict. Please retry.")
+        raise HTTPException(status_code=500, detail=msg)
 
 
 @app.delete("/api/bundles/{bundle_id}/documents/{document_id}")
@@ -189,5 +195,8 @@ def api_remove_from_bundle(bundle_id: str, document_id: str) -> JSONResponse:
         remove_document_from_bundle(_uuid.UUID(str(bundle_id)), _uuid.UUID(str(document_id)))
         return JSONResponse({"status": "ok"})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        msg = str(e)
+        if "prepared statement" in msg:
+            raise HTTPException(status_code=503, detail="Database connection state conflict. Please retry.")
+        raise HTTPException(status_code=500, detail=msg)
 
