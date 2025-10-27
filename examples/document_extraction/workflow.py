@@ -56,26 +56,26 @@ class InvoiceAgentSchema(BaseModel):
     amount: float
     currency: str
     grandTotal: float
-    vendorAddress: str
-    vendorPhone: str
-    vendorContact: str
-    salesContact: str
+    vendorAddress: str | None
+    vendorPhone: str | None
+    vendorContact: str | None
+    salesContact: str | None
     issueDate: str
     dueDate: str
-    poReference: str
-    customerPONumber: str
-    terms: str
-    orderType: str
+    poReference: str | None
+    customerPONumber: str | None
+    terms: str | None
+    orderType: str | None
     subtotal: float
     taxTotal: float
     freightTotal: float
     otherTotal: float
-    billTo: str
-    shipTo: str
-    deliveryCompany: str
-    deliveryAddress: str
-    deliveryDate: str
-    brand: str
+    billTo: str | None
+    shipTo: str | None
+    deliveryCompany: str | None
+    deliveryAddress: str | None
+    deliveryDate: str | None
+    brand: str | None
     invoiceLines: list[InvoiceAgentSchemaInvoiceLinesItem]
     invoiceMetadata: InvoiceAgentSchemaInvoiceMetadata
     confidence: float
@@ -144,22 +144,22 @@ class InspectionAgentSchemaInspectionMetadata(BaseModel):
 
 
 class InspectionAgentSchema(BaseModel):
-    inspectionTime: str
-    inspectionDate: str
-    inspectionNumber: str
-    commodity: str
-    brand: str
-    grade: str
-    location: str
-    facility: str
-    inspector: str
-    controlPoint: str
-    lotOrPo: str
-    comments: str
-    salesContact: str
-    vendorContact: str
-    orderType: str
-    terms: str
+    inspectionTime: str | None
+    inspectionDate: str | None
+    inspectionNumber: str | None
+    commodity: str | None
+    brand: str | None
+    grade: str | None
+    location: str | None
+    facility: str | None
+    inspector: str | None
+    controlPoint: str | None
+    lotOrPo: str | None
+    comments: str | None
+    salesContact: str | None
+    vendorContact: str | None
+    orderType: str | None
+    terms: str | None
     thresholds: InspectionAgentSchemaThresholds
     temperature: InspectionAgentSchemaTemperature
     deliveryInfo: InspectionAgentSchemaDeliveryInfo
@@ -212,30 +212,30 @@ class BolAgentSchemaBolMetadata(BaseModel):
 
 class BolAgentSchema(BaseModel):
     bolNumber: str
-    shipDate: str
-    deliveryDate: str
-    requestedDate: str
+    shipDate: str | None
+    deliveryDate: str | None
+    requestedDate: str | None
     carrier: str
     shipper: str
-    carrierSCAC: str
-    carrierName: str
-    trailerLicense: str
-    sealNumber: str
-    proNumber: str
-    origin: str
-    destination: str
-    brand: str
-    trackingNumber: str
-    customerPONumber: str
-    palletCount: float
-    pickupCompany: str
-    pickupAddress: str
-    pickupContact: str
-    pickupPhone: str
-    deliveryCompany: str
-    deliveryAddress: str
-    deliveryContact: str
-    deliveryPhone: str
+    carrierSCAC: str | None
+    carrierName: str | None
+    trailerLicense: str | None
+    sealNumber: str | None
+    proNumber: str | None
+    origin: str | None
+    destination: str | None
+    brand: str | None
+    trackingNumber: str | None
+    customerPONumber: str | None
+    palletCount: float | None
+    pickupCompany: str | None
+    pickupAddress: str | None
+    pickupContact: str | None
+    pickupPhone: str | None
+    deliveryCompany: str | None
+    deliveryAddress: str | None
+    deliveryContact: str | None
+    deliveryPhone: str | None
     weights: BolAgentSchemaWeights
     temperature: BolAgentSchemaTemperature
     items: list[BolAgentSchemaItemsItem]
@@ -293,34 +293,34 @@ class PurchaseOrderAgentSchemaPoMetadata(BaseModel):
 class PurchaseOrderAgentSchema(BaseModel):
     poNumber: str
     vendorName: str
-    vendorAddress: str
-    vendorPhone: str
-    vendorContact: str
-    buyerName: str
-    buyerAddress: str
-    buyerContact: str
-    salesContact: str
-    amount: float
-    currency: str
-    payTerms: str
-    issueDate: str
-    dueDate: str
-    shipDate: str
-    requestedDate: str
-    deliveryDate: str
-    customerPONumber: str
-    orderType: str
-    subtotal: float
-    taxTotal: float
-    freightTotal: float
-    otherTotal: float
-    grandTotal: float
-    shipToCity: str
-    shipToState: str
-    deliveryCompany: str
-    deliveryAddress: str
-    brand: str
-    poCategory: str
+    vendorAddress: str | None
+    vendorPhone: str | None
+    vendorContact: str | None
+    buyerName: str | None
+    buyerAddress: str | None
+    buyerContact: str | None
+    salesContact: str | None
+    amount: float | None
+    currency: str | None
+    payTerms: str | None
+    issueDate: str | None
+    dueDate: str | None
+    shipDate: str | None
+    requestedDate: str | None
+    deliveryDate: str | None
+    customerPONumber: str | None
+    orderType: str | None
+    subtotal: float | None
+    taxTotal: float | None
+    freightTotal: float | None
+    otherTotal: float | None
+    grandTotal: float | None
+    shipToCity: str | None
+    shipToState: str | None
+    deliveryCompany: str | None
+    deliveryAddress: str | None
+    brand: str | None
+    poCategory: str | None
     lineItems: list[PurchaseOrderAgentSchemaLineItemsItem]
     poMetadata: PurchaseOrderAgentSchemaPoMetadata
     confidence: float
@@ -361,10 +361,10 @@ class UsdaAgentSchemaInspectionEvent(BaseModel):
 
 class UsdaAgentSchemaDefectSummaryItem(BaseModel):
     defect_name: str
-    damage_percentage_range: str
-    damage_count: float
-    serious_damage_count: float
-    very_serious_damage_count: float
+    damage_percentage_range: str | None  # Optional - not all defects have ranges
+    damage_count: float | None
+    serious_damage_count: float | None
+    very_serious_damage_count: float | None
 
 
 class UsdaAgentSchemaLotsInspectedItem(BaseModel):
@@ -383,8 +383,8 @@ class UsdaAgentSchemaLotsInspectedItem(BaseModel):
 
 class UsdaAgentSchema(BaseModel):
     certificate_id: str
-    report_id: str
-    online_access_password: str
+    report_id: str | None
+    online_access_password: str | None
     logistics_and_parties: UsdaAgentSchemaLogisticsAndParties
     inspection_event: UsdaAgentSchemaInspectionEvent
     lots_inspected: list[UsdaAgentSchemaLotsInspectedItem]
@@ -436,7 +436,7 @@ class ColdStorageAgentSchema(BaseModel):
     InvoiceHeader: ColdStorageAgentSchemaInvoiceHeader
     Vendor: ColdStorageAgentSchemaVendor
     BillTo: ColdStorageAgentSchemaBillTo
-    PO_Reference_Structure: ColdStorageAgentSchemaPOReferenceStructure
+    PO_Reference_Structure: ColdStorageAgentSchemaPOReferenceStructure | None
     LineItems: list[ColdStorageAgentSchemaLineItemsItem]
     FinancialSummary: ColdStorageAgentSchemaFinancialSummary
 

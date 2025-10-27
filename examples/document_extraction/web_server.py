@@ -15,9 +15,17 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from .supabase_store import InsertContext, insert_extraction_result
+from .supabase_store import (
+    InsertContext,
+    insert_extraction_result,
+    list_unassigned_documents,
+    list_bundles,
+    create_bundle_for_document,
+    add_document_to_bundle,
+    remove_document_from_bundle,
+)
 from .workflow import WorkflowInput, run_workflow
 
 
@@ -104,4 +112,82 @@ async def upload_run(file: UploadFile = File(...)) -> dict[str, Any]:
     else:
         print("\n=== Database storage skipped (DATABASE_URL not set) ===")
         return {"status": "ok", "stored": False}
+
+
+@app.get("/api/documents/unassigned")
+def api_list_unassigned(org_id: int | None = None) -> JSONResponse:
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=500, detail="DATABASE_URL not set")
+    org = org_id or int(os.environ.get("ORG_ID", 0)) or None
+    if not org:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    try:
+        docs = list_unassigned_documents(org)
+        return JSONResponse(docs)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bundles")
+def api_list_bundles(org_id: int | None = None) -> JSONResponse:
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=500, detail="DATABASE_URL not set")
+    org = org_id or int(os.environ.get("ORG_ID", 0)) or None
+    if not org:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    try:
+        bundles = list_bundles(org)
+        return JSONResponse(bundles)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bundles")
+def api_create_bundle(payload: dict[str, Any]) -> JSONResponse:
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=500, detail="DATABASE_URL not set")
+    document_id = payload.get("document_id")
+    org_id = payload.get("org_id") or int(os.environ.get("ORG_ID", 0)) or None
+    if not document_id or not org_id:
+        raise HTTPException(status_code=400, detail="document_id and org_id are required")
+    try:
+        import uuid as _uuid
+
+        bundle_id = create_bundle_for_document(_uuid.UUID(str(document_id)), int(org_id))
+        return JSONResponse({"bundle_id": str(bundle_id)})
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bundles/{bundle_id}/add")
+def api_add_to_bundle(bundle_id: str, payload: dict[str, Any]) -> JSONResponse:
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=500, detail="DATABASE_URL not set")
+    document_id = payload.get("document_id")
+    if not document_id:
+        raise HTTPException(status_code=400, detail="document_id is required")
+    try:
+        import uuid as _uuid
+
+        add_document_to_bundle(_uuid.UUID(str(bundle_id)), _uuid.UUID(str(document_id)))
+        return JSONResponse({"status": "ok"})
+    except ValueError as ve:
+        raise HTTPException(status_code=409, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/bundles/{bundle_id}/documents/{document_id}")
+def api_remove_from_bundle(bundle_id: str, document_id: str) -> JSONResponse:
+    if not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=500, detail="DATABASE_URL not set")
+    try:
+        import uuid as _uuid
+
+        remove_document_from_bundle(_uuid.UUID(str(bundle_id)), _uuid.UUID(str(document_id)))
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 

@@ -31,11 +31,43 @@
     <button id="choose" class="btn">Upload file</button>
     <button id="start" class="btn" disabled>Start</button>
     <span id="status" style="margin-left: 12px"></span>
+    <hr style="margin:24px 0" />
+    <div id="bundles">
+      <div style="margin-bottom:8px"><strong>Bundle Management</strong></div>
+      <div style="margin-bottom:8px">
+        <button id="refresh" class="btn">Refresh</button>
+      </div>
+      <div style="margin-bottom:8px">
+        <label>Unassigned documents: </label>
+        <select id="docSelect"></select>
+      </div>
+      <div style="margin-bottom:8px">
+        <label><input type="radio" name="mode" value="create" checked> Create new bundle</label>
+        <label style="margin-left:12px"><input type="radio" name="mode" value="add"> Add to existing bundle</label>
+      </div>
+      <div id="bundlePicker" style="display:none; margin-bottom:8px">
+        <label>Existing bundles: </label>
+        <select id="bundleSelect"></select>
+      </div>
+      <div>
+        <button id="createBundle" class="btn">Create bundle</button>
+        <button id="addToBundle" class="btn">Add to bundle</button>
+        <span id="bundleStatus" style="margin-left: 12px"></span>
+      </div>
+    </div>
     <script>
       const fileInput = document.getElementById('file');
       const chooseBtn = document.getElementById('choose');
       const startBtn = document.getElementById('start');
       const status = document.getElementById('status');
+      const refreshBtn = document.getElementById('refresh');
+      const docSelect = document.getElementById('docSelect');
+      const bundleSelect = document.getElementById('bundleSelect');
+      const modeInputs = document.getElementsByName('mode');
+      const bundlePicker = document.getElementById('bundlePicker');
+      const createBundleBtn = document.getElementById('createBundle');
+      const addToBundleBtn = document.getElementById('addToBundle');
+      const bundleStatus = document.getElementById('bundleStatus');
 
       chooseBtn.onclick = () => fileInput.click();
       fileInput.onchange = () => {
@@ -73,6 +105,101 @@
           chooseBtn.disabled = false;
         }
       };
+
+      function currentMode() {
+        for (const m of modeInputs) { if (m.checked) return m.value; }
+        return 'create';
+      }
+
+      modeInputs.forEach(m => {
+        m.addEventListener('change', () => {
+          bundlePicker.style.display = currentMode() === 'add' ? 'block' : 'none';
+        });
+      });
+
+      async function loadUnassigned() {
+        try {
+          const res = await fetch('/api/documents/unassigned');
+          if (!res.ok) throw new Error('Failed to load documents');
+          const docs = await res.json();
+          docSelect.innerHTML = '';
+          for (const d of docs) {
+            const opt = document.createElement('option');
+            opt.value = d.id;
+            opt.textContent = `${d.id.slice(0,8)} · ${d.label}${d.po_number? ' · PO '+d.po_number : ''}${d.invoice_number? ' · INV '+d.invoice_number : ''}`;
+            docSelect.appendChild(opt);
+          }
+        } catch (e) {
+          bundleStatus.textContent = 'Error loading documents: ' + e.message;
+        }
+      }
+
+      async function loadBundles() {
+        try {
+          const res = await fetch('/api/bundles');
+          if (!res.ok) throw new Error('Failed to load bundles');
+          const bundles = await res.json();
+          bundleSelect.innerHTML = '';
+          for (const b of bundles) {
+            const opt = document.createElement('option');
+            opt.value = b.id;
+            opt.textContent = `${b.id.slice(0,8)} · ${b.key_po_number || ''} ${b.key_invoice_number || ''}`.trim();
+            bundleSelect.appendChild(opt);
+          }
+        } catch (e) {
+          bundleStatus.textContent = 'Error loading bundles: ' + e.message;
+        }
+      }
+
+      async function refreshAll() {
+        bundleStatus.textContent = 'Refreshing…';
+        await Promise.all([loadUnassigned(), loadBundles()]);
+        bundleStatus.textContent = '';
+      }
+
+      refreshBtn.onclick = refreshAll;
+
+      createBundleBtn.onclick = async () => {
+        try {
+          const id = docSelect.value;
+          if (!id) return;
+          bundleStatus.textContent = 'Creating bundle…';
+          const res = await fetch('/api/bundles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_id: id })
+          });
+          const body = await res.json();
+          if (!res.ok) throw new Error(body.detail || 'Create failed');
+          bundleStatus.textContent = 'Created bundle ' + body.bundle_id.slice(0,8);
+          await refreshAll();
+        } catch (e) {
+          bundleStatus.textContent = 'Error: ' + e.message;
+        }
+      };
+
+      addToBundleBtn.onclick = async () => {
+        try {
+          const id = docSelect.value;
+          const bundleId = bundleSelect.value;
+          if (!id || !bundleId) return;
+          bundleStatus.textContent = 'Adding…';
+          const res = await fetch(`/api/bundles/${bundleId}/add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_id: id })
+          });
+          const body = await res.json();
+          if (!res.ok) throw new Error(body.detail || 'Add failed');
+          bundleStatus.textContent = 'Added to bundle';
+          await refreshAll();
+        } catch (e) {
+          bundleStatus.textContent = 'Error: ' + e.message;
+        }
+      };
+
+      // Initial load
+      refreshAll();
     </script>
   </body>
 </html>

@@ -13,7 +13,7 @@ import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -133,7 +133,10 @@ def _trim_text(value: Any) -> str | None:
         return None
     if isinstance(value, str):
         trimmed = value.strip()
-        return trimmed or None
+        # Handle empty strings and common null representations
+        if not trimmed or trimmed.lower() in (":null", "null", "n/a", "na"):
+            return None
+        return trimmed
     return str(value)
 
 
@@ -261,7 +264,7 @@ def _set_document_status(cur: psycopg.Cursor[Any], document_id: uuid.UUID, statu
 
 def soft_delete_document(document_id: uuid.UUID) -> None:
     database_url = _get_database_url()
-    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row) as conn:
+    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row, prepare_threshold=0) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT openai.soft_delete_document(%s)", (document_id,))
 
@@ -295,7 +298,9 @@ def insert_extraction_result(
 
     database_url = _get_database_url()
 
-    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row) as conn:
+    # Use prepare_threshold=0 to disable prepared statements and avoid
+    # "prepared statement already exists" errors on connection reuse
+    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
         with conn.cursor() as cur:
             inserted_ids: dict[str, Any] = {}
 
@@ -328,9 +333,368 @@ def insert_extraction_result(
             if extraction_type != "fallback":
                 _set_document_status(cur, document_id, "stored")
 
+            # Persist a JSONB snapshot of the document's structured data on the document row.
+            try:
+                snapshot: dict[str, Any] = {
+                    "document_id": str(document_id),
+                    "type": extraction_type,
+                    "classification": classification or {},
+                    "extraction": extraction or {},
+                    "inserted_ids": {k: (str(v) if isinstance(v, uuid.UUID) else v) for k, v in inserted_ids.items()},
+                    "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
+                cur.execute(
+                    "UPDATE openai.documents SET document_data = %s WHERE id = %s",
+                    (Jsonb(snapshot), document_id),
+                )
+            except Exception:
+                # Do not fail the whole transaction if snapshotting has an unexpected shape.
+                pass
+
         conn.commit()
         return inserted_ids
 
+
+def _fetch_one(cur: psycopg.Cursor[Any], query: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
+    cur.execute(query, params)
+    return cur.fetchone()
+
+
+def _fetch_all(cur: psycopg.Cursor[Any], query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+    cur.execute(query, params)
+    return list(cur.fetchall() or [])
+
+
+def _get_document_row(cur: psycopg.Cursor[Any], document_id: uuid.UUID) -> dict[str, Any]:
+    row = _fetch_one(
+        cur,
+        """
+        select id, org_id, classification_label, assigned_bundles, document_data
+        from openai.documents
+        where id = %s
+        """,
+        (document_id,),
+    )
+    if not row:
+        raise ValueError("Document not found.")
+    return row
+
+
+def _get_po_number(cur: psycopg.Cursor[Any], document_id: uuid.UUID) -> str | None:
+    po = _fetch_one(
+        cur,
+        "select po_number from openai.purchase_orders where document_id = %s",
+        (document_id,),
+    )
+    value = _trim_text((po or {}).get("po_number")) if po else None
+    return value
+
+
+def _get_invoice_number(cur: psycopg.Cursor[Any], document_id: uuid.UUID) -> str | None:
+    inv = _fetch_one(
+        cur,
+        "select invoice_number from openai.invoices where document_id = %s",
+        (document_id,),
+    )
+    if inv and _trim_text(inv.get("invoice_number")):
+        return _trim_text(inv.get("invoice_number"))
+    cold = _fetch_one(
+        cur,
+        "select invoice_number from openai.cold_storage_invoices where document_id = %s",
+        (document_id,),
+    )
+    return _trim_text((cold or {}).get("invoice_number")) if cold else None
+
+
+def _get_document_snapshot(cur: psycopg.Cursor[Any], document_id: uuid.UUID) -> dict[str, Any]:
+    row = _get_document_row(cur, document_id)
+    snapshot = row.get("document_data")
+    if not snapshot:
+        return {
+            "document_id": str(document_id),
+            "type": row.get("classification_label"),
+        }
+    # Ensure document_id exists in snapshot
+    if not snapshot.get("document_id"):
+        snapshot = dict(snapshot)
+        snapshot["document_id"] = str(document_id)
+    return snapshot
+
+
+def _update_document_assigned_bundles(
+    cur: psycopg.Cursor[Any], document_id: uuid.UUID, add_bundle_id: uuid.UUID | None, remove_bundle_id: uuid.UUID | None
+) -> None:
+    row = _get_document_row(cur, document_id)
+    bundles = row.get("assigned_bundles") or []
+    if not isinstance(bundles, list):
+        bundles = []
+    # store as list of UUID string values
+    bundle_ids: list[str] = [str(x) for x in bundles if isinstance(x, (str, uuid.UUID))]
+    if add_bundle_id is not None:
+        if str(add_bundle_id) not in bundle_ids:
+            bundle_ids.append(str(add_bundle_id))
+    if remove_bundle_id is not None:
+        bundle_ids = [b for b in bundle_ids if b != str(remove_bundle_id)]
+    cur.execute(
+        "update openai.documents set assigned_bundles = %s where id = %s",
+        (Jsonb(bundle_ids), document_id),
+    )
+
+
+def _append_bundle_snapshot(
+    cur: psycopg.Cursor[Any], bundle_id: uuid.UUID, doc_snapshot: dict[str, Any]
+) -> None:
+    row = _fetch_one(
+        cur,
+        "select documents_snapshot from openai.bundles where id = %s",
+        (bundle_id,),
+    )
+    if not row:
+        raise ValueError("Bundle not found.")
+    arr = row.get("documents_snapshot") or []
+    if not isinstance(arr, list):
+        arr = []
+    # Avoid duplicates by document_id
+    doc_id_str = str(doc_snapshot.get("document_id")) if doc_snapshot else None
+    filtered = [x for x in arr if (isinstance(x, dict) and str(x.get("document_id")) != doc_id_str)]
+    filtered.append(doc_snapshot)
+    cur.execute(
+        "update openai.bundles set documents_snapshot = %s, updated_at = now() where id = %s",
+        (Jsonb(filtered), bundle_id),
+    )
+
+
+def _remove_bundle_snapshot(cur: psycopg.Cursor[Any], bundle_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    row = _fetch_one(
+        cur,
+        "select documents_snapshot from openai.bundles where id = %s",
+        (bundle_id,),
+    )
+    if not row:
+        return
+    arr = row.get("documents_snapshot") or []
+    if not isinstance(arr, list):
+        arr = []
+    filtered = [x for x in arr if not (isinstance(x, dict) and str(x.get("document_id")) == str(document_id))]
+    cur.execute(
+        "update openai.bundles set documents_snapshot = %s, updated_at = now() where id = %s",
+        (Jsonb(filtered), bundle_id),
+    )
+
+
+def _build_bundle_key_fields(
+    cur: psycopg.Cursor[Any], document_id: uuid.UUID, doc_type: str
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    key_po = None
+    key_invoice = None
+    summary: dict[str, Any] | None = None
+
+    if doc_type == "purchase_order":
+        key_po = _get_po_number(cur, document_id)
+        po = _fetch_one(
+            cur,
+            """
+            select subtotal, tax_total, freight_total, other_total, grand_total, amount, currency
+            from openai.purchase_orders where document_id = %s
+            """,
+            (document_id,),
+        )
+        if po:
+            summary = {k: po.get(k) for k in ["amount", "currency", "subtotal", "tax_total", "freight_total", "other_total", "grand_total"] if k in po}
+    elif doc_type in {"invoice", "cold_storage_invoice"}:
+        key_invoice = _get_invoice_number(cur, document_id)
+        inv = _fetch_one(
+            cur,
+            "select subtotal, tax_total, freight_total, other_total, grand_total, currency from openai.invoices where document_id = %s",
+            (document_id,),
+        )
+        if not inv:
+            inv = _fetch_one(
+                cur,
+                "select total_amount as grand_total from openai.cold_storage_invoices where document_id = %s",
+                (document_id,),
+            )
+        if inv:
+            summary = {k: inv.get(k) for k in ["subtotal", "tax_total", "freight_total", "other_total", "grand_total", "currency"] if k in inv}
+
+    return key_po, key_invoice, summary
+
+
+def create_bundle_for_document(document_id: uuid.UUID, org_id: int) -> uuid.UUID:
+    database_url = _get_database_url()
+    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
+        with conn.cursor() as cur:
+            doc = _get_document_row(cur, document_id)
+            if doc.get("org_id") != org_id:
+                raise ValueError("Document org does not match.")
+
+            doc_type = _normalize_document_label(doc.get("classification_label"))
+            if doc_type not in {"purchase_order", "invoice", "cold_storage_invoice"}:
+                raise ValueError("Only purchase_order or invoice documents can create a new bundle.")
+
+            key_po, key_invoice, summary = _build_bundle_key_fields(cur, document_id, doc_type)
+            if not key_po and not key_invoice:
+                raise ValueError("Cannot create bundle: missing PO number and Invoice number.")
+
+            # Insert bundle row
+            bundle_id = _insert_and_return(
+                cur,
+                "openai.bundles",
+                {
+                    "org_id": org_id,
+                    "primary_document_id": document_id,
+                    "key_po_number": key_po,
+                    "key_invoice_number": key_invoice,
+                    "key_summary": _to_jsonb(summary) if summary else None,
+                },
+            )
+            if not isinstance(bundle_id, uuid.UUID):
+                bundle_id = uuid.UUID(str(bundle_id))
+
+            # Join and snapshots
+            doc_snapshot = _get_document_snapshot(cur, document_id)
+            cur.execute(
+                """
+                insert into openai.bundle_documents (bundle_id, document_id, doc_type, document_snapshot)
+                values (%s, %s, %s, %s)
+                on conflict do nothing
+                """,
+                (bundle_id, document_id, doc_type, Jsonb(doc_snapshot)),
+            )
+            _update_document_assigned_bundles(cur, document_id, add_bundle_id=bundle_id, remove_bundle_id=None)
+            _append_bundle_snapshot(cur, bundle_id, doc_snapshot)
+
+        conn.commit()
+        return bundle_id
+
+
+def add_document_to_bundle(bundle_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    database_url = _get_database_url()
+    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
+        with conn.cursor() as cur:
+            bundle = _fetch_one(
+                cur,
+                "select id, org_id from openai.bundles where id = %s",
+                (bundle_id,),
+            )
+            if not bundle:
+                raise ValueError("Bundle not found.")
+            doc = _get_document_row(cur, document_id)
+            if doc.get("org_id") != bundle.get("org_id"):
+                raise ValueError("Document org does not match bundle org.")
+
+            doc_type = _normalize_document_label(doc.get("classification_label"))
+
+            # Enforce single-bundle membership for PO/Invoice at app layer before DB constraint raises.
+            if doc_type in {"purchase_order", "invoice"}:
+                exists = _fetch_one(
+                    cur,
+                    "select 1 from openai.bundle_documents where document_id = %s",
+                    (document_id,),
+                )
+                if exists:
+                    raise ValueError("This document type can only belong to one bundle.")
+
+            doc_snapshot = _get_document_snapshot(cur, document_id)
+            cur.execute(
+                """
+                insert into openai.bundle_documents (bundle_id, document_id, doc_type, document_snapshot)
+                values (%s, %s, %s, %s)
+                on conflict do nothing
+                """,
+                (bundle_id, document_id, doc_type, Jsonb(doc_snapshot)),
+            )
+            _update_document_assigned_bundles(cur, document_id, add_bundle_id=bundle_id, remove_bundle_id=None)
+            _append_bundle_snapshot(cur, bundle_id, doc_snapshot)
+
+        conn.commit()
+
+
+def remove_document_from_bundle(bundle_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    database_url = _get_database_url()
+    with psycopg.connect(database_url, autocommit=False, row_factory=dict_row, prepare_threshold=0) as conn:
+        with conn.cursor() as cur:
+            # Remove association first
+            cur.execute(
+                "delete from openai.bundle_documents where bundle_id = %s and document_id = %s",
+                (bundle_id, document_id),
+            )
+            _update_document_assigned_bundles(cur, document_id, add_bundle_id=None, remove_bundle_id=bundle_id)
+            _remove_bundle_snapshot(cur, bundle_id, document_id)
+
+            # Check if bundle is now empty
+            count_row = _fetch_one(
+                cur,
+                "select count(*) as c from openai.bundle_documents where bundle_id = %s",
+                (bundle_id,),
+            )
+            remaining = int((count_row or {}).get("c", 0))
+            if remaining == 0:
+                # Delete bundle entirely
+                cur.execute("delete from openai.bundles where id = %s", (bundle_id,))
+            else:
+                # Touch updated_at
+                cur.execute("update openai.bundles set updated_at = now() where id = %s", (bundle_id,))
+
+        conn.commit()
+
+
+def list_unassigned_documents(org_id: int) -> list[dict[str, Any]]:
+    database_url = _get_database_url()
+    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row, prepare_threshold=0) as conn:
+        with conn.cursor() as cur:
+            rows = _fetch_all(
+                cur,
+                """
+                select id, classification_label, created_at
+                from openai.documents
+                where org_id = %s
+                  and coalesce(jsonb_array_length(assigned_bundles), 0) = 0
+                  and deleted_at is null
+                order by created_at desc
+                """,
+                (org_id,),
+            )
+
+            result: list[dict[str, Any]] = []
+            for r in rows:
+                doc_id = r["id"]
+                label = _normalize_document_label(r.get("classification_label"))
+                po = _get_po_number(cur, doc_id) if label == "purchase_order" else None
+                inv = _get_invoice_number(cur, doc_id) if label in {"invoice", "cold_storage_invoice"} else None
+                result.append(
+                    {
+                        "id": str(doc_id),
+                        "label": label,
+                        "po_number": po,
+                        "invoice_number": inv,
+                        "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                    }
+                )
+            return result
+
+
+def list_bundles(org_id: int) -> list[dict[str, Any]]:
+    database_url = _get_database_url()
+    with psycopg.connect(database_url, autocommit=True, row_factory=dict_row, prepare_threshold=0) as conn:
+        with conn.cursor() as cur:
+            bundles = _fetch_all(
+                cur,
+                """
+                select b.id, b.key_po_number, b.key_invoice_number, b.created_at, b.updated_at,
+                       (select count(*) from openai.bundle_documents bd where bd.bundle_id = b.id) as document_count
+                from openai.bundles b
+                where b.org_id = %s
+                order by b.created_at desc
+                """,
+                (org_id,),
+            )
+            for b in bundles:
+                b["id"] = str(b["id"]) if isinstance(b.get("id"), uuid.UUID) else b.get("id")
+                for k in ("created_at", "updated_at"):
+                    if b.get(k):
+                        b[k] = b[k].isoformat()
+            return bundles
 
 def _insert_invoice(
     cur: psycopg.Cursor[Any],
@@ -966,11 +1330,8 @@ def _insert_usda_inspection(
         for defect in lot.get("defect_summary", []) or []:
             defect_name = _trim_text(defect.get("defect_name"))
             damage_range = _trim_text(defect.get("damage_percentage_range"))
-            if not defect_name or not damage_range:
-                raise ValueError(
-                    "usda_inspection defect_summary entries require defect_name and damage_percentage_range."
-                )
-
+            
+            # Store all defects, even with missing name or range (allows summary rows)
             damage_pct_low, damage_pct_high = _parse_percentage_range(damage_range)
 
             _insert_and_return(
@@ -978,7 +1339,7 @@ def _insert_usda_inspection(
                 "openai.usda_lot_defects",
                 {
                     "lot_id": lot_record_id,
-                    "defect_name": defect_name,
+                    "defect_name": defect_name or "Unknown",
                     "damage_percentage_range": damage_range,
                     "damage_count": _to_int(defect.get("damage_count")),
                     "serious_damage_count": _to_int(defect.get("serious_damage_count")),
